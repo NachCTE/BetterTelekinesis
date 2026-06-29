@@ -21,7 +21,8 @@ namespace HavokUtil {
     void           SetLinearVelocity(RE::bhkRigidBody* body, const RE::NiPoint3& vel);
     void           ApplyLinearImpulse(RE::bhkRigidBody* body, const RE::NiPoint3& impulse);
     float          GetMass(RE::bhkRigidBody* body);
-    void           SetGravityFactor(RE::bhkRigidBody* body, float factor);
+    // Gravity: rather than toggling gravityFactor (hkHalf), we apply a
+    // compensating upward impulse each frame via the spring-damper when holding.
 
 }  // namespace HavokUtil
 

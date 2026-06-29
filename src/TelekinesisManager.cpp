@@ -67,13 +67,11 @@ void TelekinesisManager::AddObject(bool vrLeftHand) {
 
     // Check for duplicate
     for (auto& obj : m_held) {
-        RE::TESObjectREFR* r = nullptr;
-        RE::LookupReferenceByHandle(obj.handle, r);
-        if (r == target) return;  // already held
+        if (obj.handle.get().get() == target) return;  // already held
     }
 
     HeldObjectData data;
-    RE::CreateRefHandleByID(target->GetFormID(), data.handle);
+    data.handle     = target->GetHandle();
     data.state      = HeldObjectState::Pulling;
     data.slotIndex  = static_cast<int>(m_held.size());
     data.vrLeftHand = vrLeftHand;
@@ -89,9 +87,7 @@ void TelekinesisManager::AddObject(bool vrLeftHand) {
 // ─────────────────────────────────────────────────────────────────────────────
 void TelekinesisManager::RemoveObject(RE::TESObjectREFR* ref) {
     auto it = std::find_if(m_held.begin(), m_held.end(), [ref](const HeldObjectData& d) {
-        RE::TESObjectREFR* r = nullptr;
-        RE::LookupReferenceByHandle(d.handle, r);
-        return r == ref;
+        return d.handle.get().get() == ref;
     });
 
     if (it == m_held.end()) return;
@@ -122,7 +118,7 @@ void TelekinesisManager::ThrowAll(float chargeLevel) {
     auto* settings = Settings::GetSingleton();
 
     int alterationSkill = static_cast<int>(
-        RE::PlayerCharacter::GetSingleton()->GetActorValue(RE::ActorValue::kAlteration));
+        RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAlteration));
 
     // Charged throw requires Alteration >= perkLevelCharge
     if (chargeLevel > 0.0f && alterationSkill < settings->perkLevelCharge) {
@@ -174,7 +170,7 @@ int TelekinesisManager::GetPerkMaxObjects() const {
     auto* player   = RE::PlayerCharacter::GetSingleton();
     if (!player) return 1;
 
-    int skill = static_cast<int>(player->GetActorValue(RE::ActorValue::kAlteration));
+    int skill = static_cast<int>(player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAlteration));
 
     if (skill >= settings->perkLevelMax5)   return 5;
     if (skill >= settings->perkLevelCharge) return 4;
@@ -239,7 +235,7 @@ void TelekinesisManager::Update(float dt) {
     // Orbit shield
     auto* settings = Settings::GetSingleton();
     int altSkill = static_cast<int>(
-        RE::PlayerCharacter::GetSingleton()->GetActorValue(RE::ActorValue::kAlteration));
+        RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAlteration));
 
     if (settings->orbitShieldEnabled && total > 1 && altSkill >= settings->perkLevelOrbit) {
         CheckProjectileIntercepts();
@@ -260,14 +256,14 @@ void TelekinesisManager::DrainMagicka(float dt) {
                     * std::pow(settings->magickaCostPerObj, static_cast<float>(count - 1))
                     * dt;
 
-    float current = player->GetActorValue(RE::ActorValue::kMagicka);
+    float current = player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kMagicka);
     if (current <= 0.0f) {
         logger::info("Magicka exhausted — dropping all objects");
         DropAll();
         return;
     }
 
-    player->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
+    player->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
                                RE::ActorValue::kMagicka, -cost);
 }
 
@@ -282,30 +278,32 @@ void TelekinesisManager::CheckProjectileIntercepts() {
     RE::NiPoint3 playerPos = player->GetPosition();
     float        rSq       = settings->interceptRadius * settings->interceptRadius;
 
-    // Check all active projectiles in process lists
-    auto* pl = RE::ProcessLists::GetSingleton();
-    if (!pl) return;
+    // Check all active projectiles by iterating the player's current cell
+    auto* cell = player->GetParentCell();
+    if (!cell) return;
 
-    pl->GetMagicEffects([&](RE::BSTArray<RE::ProjectileHandle>& projHandles) {
-        for (auto& handle : projHandles) {
-            auto* proj = handle.get().get();
-            if (!proj) continue;
-            if (proj->shooter.get().get() == player) continue;  // our own projectiles
+    cell->ForEachReference([&](RE::TESObjectREFR& refr) {
+        auto* proj = refr.AsProjectile();
+        if (!proj) return RE::BSContainer::ForEachResult::kContinue;
 
-            RE::NiPoint3 projPos = proj->GetPosition();
-            float dx = projPos.x - playerPos.x;
-            float dy = projPos.y - playerPos.y;
-            float dz = projPos.z - playerPos.z;
+        // Skip our own projectiles
+        auto& rtData = proj->GetProjectileRuntimeData();
+        if (rtData.shooter.get().get() == player)
+            return RE::BSContainer::ForEachResult::kContinue;
 
-            if (dx * dx + dy * dy + dz * dz <= rSq) {
-                // Within intercept sphere — roll chance
-                float roll = static_cast<float>(rand()) / RAND_MAX;
-                if (roll < settings->interceptChance) {
-                    proj->SetPosition({ projPos.x, projPos.y, projPos.z + 9999.0f });
-                    proj->Disable();
-                    logger::debug("Orbit shield intercepted projectile {:08X}", proj->GetFormID());
-                }
+        RE::NiPoint3 projPos = proj->GetPosition();
+        float dx = projPos.x - playerPos.x;
+        float dy = projPos.y - playerPos.y;
+        float dz = projPos.z - playerPos.z;
+
+        if (dx * dx + dy * dy + dz * dz <= rSq) {
+            float roll = static_cast<float>(rand()) / RAND_MAX;
+            if (roll < settings->interceptChance) {
+                proj->SetPosition({ projPos.x, projPos.y, projPos.z + 9999.0f });
+                proj->Disable();
+                logger::debug("Orbit shield intercepted projectile {:08X}", proj->GetFormID());
             }
         }
+        return RE::BSContainer::ForEachResult::kContinue;
     });
 }

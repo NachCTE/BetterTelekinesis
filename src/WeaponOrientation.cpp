@@ -26,22 +26,21 @@ RE::NiPoint3 WeaponOrientation::GetTipVector(RE::TESObjectWEAP* weap) const {
 
     using WT = RE::WEAPON_TYPE;
     switch (weap->GetWeaponType()) {
-    case WT::kSword:
-    case WT::kGreatSword:
-    case WT::kDagger:
+    case WT::kOneHandSword:
+    case WT::kTwoHandSword:
+    case WT::kOneHandDagger:
         return { 0.0f, 1.0f, 0.0f };  // tip along local +Y
 
-    case WT::kWarAxe:
-    case WT::kBattleAxe:
+    case WT::kOneHandAxe:
+    case WT::kTwoHandAxe:
         return { 1.0f, 0.0f, 0.0f };  // blade edge along local +X
 
-    case WT::kMace:
-    case WT::kWarhammer:
+    case WT::kOneHandMace:
         return { 0.0f, 1.0f, 0.0f };  // head along +Y
 
     case WT::kBow:
     case WT::kCrossbow:
-        return { 0.0f, 1.0f, 0.0f };  // arrow notch end
+        return { 0.0f, 1.0f, 0.0f };
 
     case WT::kStaff:
         return { 0.0f, 1.0f, 0.0f };
@@ -67,12 +66,10 @@ RE::NiMatrix3 WeaponOrientation::RotationFromTo(const RE::NiPoint3& from,
     float cosA = MathUtil::Dot(f, t);
     cosA = std::clamp(cosA, -1.0f, 1.0f);
 
-    RE::NiMatrix3 mat;
+    RE::NiMatrix3 mat;  // default constructor = identity
 
     if (cosA > 0.9999f) {
-        // Already aligned — identity
-        mat.MakeIdentity();
-        return mat;
+        return mat;  // already aligned
     }
 
     if (cosA < -0.9999f) {
@@ -86,7 +83,7 @@ RE::NiMatrix3 WeaponOrientation::RotationFromTo(const RE::NiPoint3& from,
            -f.x * perp.z + f.z * perp.x,
             f.x * perp.y - f.y * perp.x
         });
-        float s = 0.0f, c = -1.0f;
+        // Rodrigues for 180° — no angle variables needed
         // Rodrigues for 180°
         mat.entry[0][0] = 2.0f * axis.x * axis.x - 1.0f;
         mat.entry[0][1] = 2.0f * axis.x * axis.y;
@@ -157,14 +154,20 @@ void WeaponOrientation::OrientToward(RE::TESObjectREFR* ref,
     if (body) {
         auto* hkBody = static_cast<RE::hkpRigidBody*>(body->referencedObject.get());
         if (hkBody) {
-            // Convert NiMatrix3 to hkRotation
-            RE::hkMatrix3 hkRot;
-            for (int r = 0; r < 3; r++) {
-                for (int c = 0; c < 3; c++) {
-                    hkRot.col[c].quad.m128_f32[r] = rot.entry[r][c];
-                }
-            }
-            hkBody->motion.motionState.transform.rotation = hkRot;
+            // hkMatrix3 has col0, col1, col2 (column-major)
+            auto& rotation = hkBody->motion.motionState.transform.rotation;
+            rotation.col0.quad.m128_f32[0] = rot.entry[0][0];
+            rotation.col0.quad.m128_f32[1] = rot.entry[1][0];
+            rotation.col0.quad.m128_f32[2] = rot.entry[2][0];
+            rotation.col0.quad.m128_f32[3] = 0.0f;
+            rotation.col1.quad.m128_f32[0] = rot.entry[0][1];
+            rotation.col1.quad.m128_f32[1] = rot.entry[1][1];
+            rotation.col1.quad.m128_f32[2] = rot.entry[2][1];
+            rotation.col1.quad.m128_f32[3] = 0.0f;
+            rotation.col2.quad.m128_f32[0] = rot.entry[0][2];
+            rotation.col2.quad.m128_f32[1] = rot.entry[1][2];
+            rotation.col2.quad.m128_f32[2] = rot.entry[2][2];
+            rotation.col2.quad.m128_f32[3] = 0.0f;
         }
     }
 }

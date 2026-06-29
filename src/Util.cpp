@@ -27,14 +27,17 @@ RE::bhkRigidBody* GetRigidBody(RE::TESObjectREFR* ref) {
     if (!root) return nullptr;
     auto* colObj = root->collisionObject.get();
     if (!colObj) return nullptr;
-    return static_cast<RE::bhkRigidBody*>(colObj->GetRigidBody());
+    // NiCollisionObject → bhkNiCollisionObject → body (bhkWorldObject) → cast to bhkRigidBody
+    auto* bhkCol = static_cast<RE::bhkNiCollisionObject*>(colObj);
+    if (!bhkCol || !bhkCol->body) return nullptr;
+    return static_cast<RE::bhkRigidBody*>(bhkCol->body.get());
 }
 
 RE::NiPoint3 GetPosition(RE::bhkRigidBody* body) {
     if (!body) return {};
-    auto* hkBody = static_cast<RE::hkpRigidBody*>(body->referencedObject.get());
-    if (!hkBody) return {};
-    return FromHavok(hkBody->motion.motionState.transform.translation);
+    RE::hkVector4 out{};
+    body->GetPosition(out);
+    return FromHavok(out);
 }
 
 RE::NiPoint3 GetLinearVelocity(RE::bhkRigidBody* body) {
@@ -46,21 +49,12 @@ RE::NiPoint3 GetLinearVelocity(RE::bhkRigidBody* body) {
 
 void SetLinearVelocity(RE::bhkRigidBody* body, const RE::NiPoint3& vel) {
     if (!body) return;
-    auto* hkBody = static_cast<RE::hkpRigidBody*>(body->referencedObject.get());
-    if (!hkBody) return;
-    hkBody->motion.linearVelocity = ToHavok(vel);
+    body->SetLinearVelocity(ToHavok(vel));
 }
 
 void ApplyLinearImpulse(RE::bhkRigidBody* body, const RE::NiPoint3& impulse) {
     if (!body) return;
-    auto* hkBody = static_cast<RE::hkpRigidBody*>(body->referencedObject.get());
-    if (!hkBody) return;
-    auto current = hkBody->motion.linearVelocity;
-    auto add      = ToHavok(impulse);
-    current.quad.m128_f32[0] += add.quad.m128_f32[0];
-    current.quad.m128_f32[1] += add.quad.m128_f32[1];
-    current.quad.m128_f32[2] += add.quad.m128_f32[2];
-    hkBody->motion.linearVelocity = current;
+    body->SetLinearImpulse(ToHavok(impulse));
 }
 
 float GetMass(RE::bhkRigidBody* body) {
@@ -69,13 +63,6 @@ float GetMass(RE::bhkRigidBody* body) {
     if (!hkBody) return 0.0f;
     float invMass = hkBody->motion.inertiaAndMassInv.quad.m128_f32[3];
     return (invMass > 1e-6f) ? (1.0f / invMass) : 0.0f;
-}
-
-void SetGravityFactor(RE::bhkRigidBody* body, float factor) {
-    if (!body) return;
-    auto* hkBody = static_cast<RE::hkpRigidBody*>(body->referencedObject.get());
-    if (!hkBody) return;
-    hkBody->motion.gravityFactor = factor;
 }
 
 }  // namespace HavokUtil

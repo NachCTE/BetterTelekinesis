@@ -14,9 +14,7 @@ ObjectManipulation* ObjectManipulation::GetSingleton() {
 // HeldObjectData helpers
 // ─────────────────────────────────────────────────────────────────────────────
 RE::TESObjectREFR* HeldObjectData::Ref() const {
-    RE::TESObjectREFR* ref = nullptr;
-    RE::LookupReferenceByHandle(handle, ref);
-    return ref;
+    return handle.get().get();
 }
 
 bool HeldObjectData::IsValid() const {
@@ -30,10 +28,7 @@ bool HeldObjectData::IsValid() const {
 void ObjectManipulation::BeginPull(RE::TESObjectREFR* ref) const {
     auto* body = HavokUtil::GetRigidBody(ref);
     if (!body) return;
-
-    HavokUtil::SetGravityFactor(body, 0.0f);
-
-    // Velocity will be set on the first UpdateHold frame to pull direction.
+    // Zero out velocity; spring-damper will pull on first UpdateHold frame
     HavokUtil::SetLinearVelocity(body, {});
 }
 
@@ -74,8 +69,8 @@ void ObjectManipulation::UpdateHold(HeldObjectData& obj, float dt) const {
         vel.y + (spring.y + damper.y) * dt,
         vel.z + (spring.z + damper.z) * dt
     };
-
     newVel = MathUtil::Clamp(newVel, settings->maxHoldSpeed);
+
     HavokUtil::SetLinearVelocity(body, newVel);
 
     // If this is a Pulling state and we're close enough, snap to Holding
@@ -113,7 +108,6 @@ void ObjectManipulation::Throw(HeldObjectData& obj) const {
         aimDir.z * force
     };
 
-    HavokUtil::SetGravityFactor(body, 1.0f);  // restore gravity
     HavokUtil::SetLinearVelocity(body, impulse);
 
     obj.releaseSpeed = MathUtil::Length(impulse);
@@ -134,7 +128,6 @@ void ObjectManipulation::Drop(HeldObjectData& obj) const {
 void ObjectManipulation::RestorePhysics(RE::TESObjectREFR* ref) const {
     auto* body = HavokUtil::GetRigidBody(ref);
     if (!body) return;
-    HavokUtil::SetGravityFactor(body, 1.0f);
     HavokUtil::SetLinearVelocity(body, {});
 }
 

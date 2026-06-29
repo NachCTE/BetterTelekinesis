@@ -1,5 +1,6 @@
 #include "ObjectTargeting.h"
 #include "TelekinesisManager.h"
+#include "SwitchInteraction.h"
 #include "Settings.h"
 #include "Util.h"
 #include <cmath>
@@ -41,10 +42,17 @@ RE::TESObjectREFR* ObjectTargeting::FindBestTarget(bool vrLeftHand) const {
         }
     };
 
-    // Iterate references in the current cell
-    for (auto& entry : cell->references) {
-        if (entry) ProcessRef(*entry);
-    }
+    // Use the cell's ForEachReference callback API
+    cell->ForEachReference([&](RE::TESObjectREFR& ref) {
+        if (IsValidTarget(&ref)) {
+            float score = ScoreTarget(&ref, origin, aimDir, maxDistSq, minCos);
+            if (score > bestScore) {
+                bestScore = score;
+                best      = &ref;
+            }
+        }
+        return RE::BSContainer::ForEachResult::kContinue;
+    });
 
     return best;
 }
@@ -60,10 +68,7 @@ bool ObjectTargeting::IsValidTarget(RE::TESObjectREFR* ref) const {
     if (!root) return false;
     if (!root->collisionObject) return false;
 
-    // Skip if already held
-    auto* mgr = TelekinesisManager::GetSingleton();
-    // We'll do a handle comparison indirectly — if we can find it in the held list.
-    // For now, rely on TelekinesisManager to reject duplicates in AddObject.
+    // Skip if already held — TelekinesisManager rejects duplicates in AddObject
 
     return true;
 }

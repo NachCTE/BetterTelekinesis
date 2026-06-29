@@ -33,7 +33,6 @@ RE::BSEventNotifyControl InputHandler::ProcessEvent(
         uint32_t keyCode  = buttonEvent->GetIDCode();
         bool     pressed  = buttonEvent->IsDown();
         bool     released = buttonEvent->IsUp();
-        bool     held     = buttonEvent->IsHeld();
 
         // ── Add object (G by default) ───────────────────────────────────────
         if (keyCode == settings->keyAddObject && pressed) {

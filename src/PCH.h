@@ -21,5 +21,8 @@
 
 // Logging
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+
+using namespace std::string_view_literals;
 
 namespace logger = SKSE::log;

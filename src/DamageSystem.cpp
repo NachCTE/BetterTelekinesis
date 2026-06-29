@@ -12,11 +12,8 @@ void DamageSystem::RegisterThrown(RE::TESObjectREFR* ref,
                                    const RE::NiPoint3& releaseVelocity) {
     if (!ref) return;
 
-    RE::ObjectRefHandle handle;
-    RE::CreateRefHandleByID(ref->GetFormID(), handle);
-
     ThrownObject obj;
-    obj.handle       = handle;
+    obj.handle       = ref->GetHandle();
     obj.lastVelocity = releaseVelocity;
     obj.lastSpeed    = MathUtil::Length(releaseVelocity);
     obj.timeAlive    = 0.0f;
@@ -29,9 +26,7 @@ void DamageSystem::RegisterThrown(RE::TESObjectREFR* ref,
 void DamageSystem::Unregister(RE::TESObjectREFR* ref) {
     if (!ref) return;
     std::erase_if(m_tracked, [&](const ThrownObject& t) {
-        RE::TESObjectREFR* r = nullptr;
-        RE::LookupReferenceByHandle(t.handle, r);
-        return r == ref;
+        return t.handle.get().get() == ref;
     });
 }
 
@@ -41,14 +36,11 @@ void DamageSystem::Unregister(RE::TESObjectREFR* ref) {
 void DamageSystem::Update(float dt) {
     if (m_tracked.empty()) return;
 
-    auto* settings = Settings::GetSingleton();
-
     std::erase_if(m_tracked, [&](ThrownObject& t) -> bool {
         t.timeAlive += dt;
         if (t.timeAlive > ThrownObject::kMaxTrackTime) return true;
 
-        RE::TESObjectREFR* ref = nullptr;
-        RE::LookupReferenceByHandle(t.handle, ref);
+        RE::TESObjectREFR* ref = t.handle.get().get();
         if (!ref || ref->IsDisabled() || ref->IsDeleted()) return true;
 
         auto* body = HavokUtil::GetRigidBody(ref);
@@ -100,22 +92,8 @@ void DamageSystem::ApplyImpactDamage(RE::TESObjectREFR* ref,
 
     logger::debug("Impact: mass={:.1f} speed={:.0f} -> damage={:.1f}", mass, impactSpeed, damage);
 
-    // Apply damage via HitData
-    RE::HitData hitData;
-    hitData.target        = target;
-    hitData.aggressor     = RE::PlayerCharacter::GetSingleton();
-    hitData.totalDamage   = damage;
-    hitData.physicalDamage = damage;
-    hitData.flags.set(RE::HitData::Flag::kBlocked);  // unblocked hit
-    hitData.flags.reset(RE::HitData::Flag::kBlocked);
-
-    target->KillImpl(RE::PlayerCharacter::GetSingleton(), damage, false, false);
-    // Use proper damage application:
-    RE::ActorValueOwner* avo = target->As<RE::ActorValueOwner>();
-    if (avo) {
-        target->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
-                                   RE::ActorValue::kHealth, -damage);
-    }
+    // Apply health damage via ActorValueOwner interface
+    target->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -damage);
 
     // Stagger on heavy impact
     bool shouldStagger = (damage >= settings->staggerThreshold)
