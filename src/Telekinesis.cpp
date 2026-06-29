@@ -115,12 +115,27 @@ RE::TESObjectREFR* Telekinesis::FindTarget() const
     RE::TESObjectREFR* best    = nullptr;
     float              bestDot = cosMax;
 
+    // Only pick up loose items (same set as vanilla telekinesis)
+    static constexpr std::array kAllowedTypes{
+        RE::FormType::Misc,        RE::FormType::Weapon,      RE::FormType::Armor,
+        RE::FormType::Ammo,        RE::FormType::Ingredient,  RE::FormType::AlchemyItem,
+        RE::FormType::Book,        RE::FormType::Scroll,      RE::FormType::SoulGem,
+        RE::FormType::KeyMaster,
+    };
+
     cell->ForEachReference([&](RE::TESObjectREFR& ref) {
         if (&ref == player)           return RE::BSContainer::ForEachResult::kContinue;
         if (ref.IsDisabled())         return RE::BSContainer::ForEachResult::kContinue;
         if (ref.IsDeleted())          return RE::BSContainer::ForEachResult::kContinue;
         if (ref.As<RE::Actor>())      return RE::BSContainer::ForEachResult::kContinue;
         if (!GetBody(&ref))           return RE::BSContainer::ForEachResult::kContinue;
+
+        // Skip anything that isn't a pickable loose item
+        auto* base = ref.GetBaseObject();
+        if (!base) return RE::BSContainer::ForEachResult::kContinue;
+        auto ft = base->GetFormType();
+        if (std::find(kAllowedTypes.begin(), kAllowedTypes.end(), ft) == kAllowedTypes.end())
+            return RE::BSContainer::ForEachResult::kContinue;
 
         RE::NiPoint3 pos  = ref.GetPosition();
         RE::NiPoint3 diff = { pos.x - origin.x,
@@ -175,11 +190,19 @@ void Telekinesis::Hold(float dt)
                              cam.y + fwd.y * kHoldDist,
                              cam.z + fwd.z * kHoldDist };
 
-    ref->SetPosition(target);
+    // Move the rendered 3D node directly so it's visible in the right place
+    if (auto* root = ref->Get3D()) {
+        root->world.translate = target;
+        root->local.translate = target;
+    }
 
-    // Zero physics velocity so Havok doesn't fight our position
-    if (auto* body = GetBody(ref))
+    // Move the Havok body (wakes it + syncs physics)
+    auto* body = GetBody(ref);
+    if (body) {
+        auto hkPos = ToHavok(target);
+        body->SetPosition(hkPos);
         body->SetLinearVelocity(ToHavok({}));
+    }
 }
 
 // ── Throw ────────────────────────────────────────────────────────────────────
