@@ -1,5 +1,6 @@
 #include "Telekinesis.h"
 #include <REL/Relocation.h>
+#include <RE/H/hkpMotion.h>
 #include <numbers>
 
 // ── Hook on PlayerCharacter::Update ────────────────────────────────────────
@@ -130,6 +131,20 @@ RE::TESObjectREFR* Telekinesis::FindTarget() const
         if (ref.As<RE::Actor>())      return RE::BSContainer::ForEachResult::kContinue;
         if (!GetBody(&ref))           return RE::BSContainer::ForEachResult::kContinue;
 
+        // Skip fixed/keyframed bodies (weapon racks, furniture displays, etc.)
+        {
+            auto* hkRef = GetBody(&ref)->referencedObject.get();
+            if (hkRef) {
+                // hkpEntity::motion at 0x150, hkpMotion::type at +0x010 = 0x160
+                constexpr std::size_t kMotionTypeOffset = 0x160;
+                auto mtype = *reinterpret_cast<const RE::hkpMotion::MotionType*>(
+                    reinterpret_cast<const std::uint8_t*>(hkRef) + kMotionTypeOffset);
+                if (mtype == RE::hkpMotion::MotionType::kFixed ||
+                    mtype == RE::hkpMotion::MotionType::kKeyframed)
+                    return RE::BSContainer::ForEachResult::kContinue;
+            }
+        }
+
         // Skip anything that isn't a pickable loose item
         auto* base = ref.GetBaseObject();
         if (!base) return RE::BSContainer::ForEachResult::kContinue;
@@ -183,25 +198,36 @@ void Telekinesis::Hold(float dt)
     }
     m_holdTime += dt;
 
-    // Float the object 150 units in front of camera, following its rotation
+    // Float the object kHoldDist units in front of camera, following rotation
     RE::NiPoint3 cam    = CameraPos();
     RE::NiPoint3 fwd    = CameraForward();
     RE::NiPoint3 target = { cam.x + fwd.x * kHoldDist,
                              cam.y + fwd.y * kHoldDist,
                              cam.z + fwd.z * kHoldDist };
 
-    // Move the rendered 3D node directly so it's visible in the right place
-    if (auto* root = ref->Get3D()) {
-        root->world.translate = target;
-        root->local.translate = target;
-    }
+    RE::NiPoint3 cur   = ref->GetPosition();
+    RE::NiPoint3 delta = { target.x - cur.x, target.y - cur.y, target.z - cur.z };
+    float dist = std::sqrt(delta.x*delta.x + delta.y*delta.y + delta.z*delta.z);
 
-    // Move the Havok body (wakes it + syncs physics)
     auto* body = GetBody(ref);
-    if (body) {
+    if (!body) return;
+
+    if (dist > 8.0f) {
+        // Spring: velocity proportional to distance, capped at max speed
+        float speed = std::min(dist * kPullStrength, kMaxPullSpeed);
+        RE::NiPoint3 vel = { (delta.x / dist) * speed,
+                             (delta.y / dist) * speed,
+                             (delta.z / dist) * speed };
+        body->SetLinearVelocity(ToHavok(vel));
+    } else {
+        // Close enough — hold perfectly still
+        body->SetLinearVelocity(ToHavok({}));
         auto hkPos = ToHavok(target);
         body->SetPosition(hkPos);
-        body->SetLinearVelocity(ToHavok({}));
+        if (auto* root = ref->Get3D()) {
+            root->world.translate = target;
+            root->local.translate = target;
+        }
     }
 }
 
