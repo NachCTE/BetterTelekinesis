@@ -1,0 +1,311 @@
+#include "TelekinesisManager.h"
+#include "ObjectTargeting.h"
+#include "ObjectManipulation.h"
+#include "DamageSystem.h"
+#include "SwitchInteraction.h"
+#include "Settings.h"
+#include "Util.h"
+#include <REL/Relocation.h>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PlayerCharacter::Update hook — fires every game frame
+// ─────────────────────────────────────────────────────────────────────────────
+struct TelekinesisManager::UpdateHook {
+    static void Thunk(RE::PlayerCharacter* player, float dt) {
+        TelekinesisManager::GetSingleton()->Update(dt);
+        DamageSystem::GetSingleton()->Update(dt);
+        func(player, dt);
+    }
+
+    static inline REL::Relocation<decltype(Thunk)*> func;
+
+    static void Install() {
+        // PlayerCharacter::Update — vtable index 0xAD (173)
+        // This offset is valid for AE 1.6.x and VR.
+        // Use Address Library ID for correct relocation.
+        REL::Relocation<std::uintptr_t> vTable{ RE::VTABLE_PlayerCharacter[0] };
+        func   = vTable.write_vfunc(0xAD, Thunk);
+        logger::info("TelekinesisManager::UpdateHook installed (vtbl+0xAD)");
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Singleton
+// ─────────────────────────────────────────────────────────────────────────────
+TelekinesisManager* TelekinesisManager::GetSingleton() {
+    static TelekinesisManager instance;
+    return &instance;
+}
+
+void TelekinesisManager::Initialize() {
+    UpdateHook::Install();
+    logger::info("TelekinesisManager initialized");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AddObject
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::AddObject(bool vrLeftHand) {
+    auto* settings = Settings::GetSingleton();
+    int   maxObj   = std::min(settings->maxObjects, GetPerkMaxObjects());
+
+    if (static_cast<int>(m_held.size()) >= maxObj) {
+        logger::debug("AddObject: already at max ({}/{})", m_held.size(), maxObj);
+        // Remove the oldest held object to make room
+        if (!m_held.empty()) {
+            ObjectManipulation::GetSingleton()->Drop(m_held.front());
+            m_held.erase(m_held.begin());
+            ObjectManipulation::GetSingleton()->RepackSlots(m_held);
+        }
+    }
+
+    auto* target = ObjectTargeting::GetSingleton()->FindBestTarget(vrLeftHand);
+    if (!target) {
+        logger::debug("AddObject: no valid target found");
+        return;
+    }
+
+    // Check for duplicate
+    for (auto& obj : m_held) {
+        RE::TESObjectREFR* r = nullptr;
+        RE::LookupReferenceByHandle(obj.handle, r);
+        if (r == target) return;  // already held
+    }
+
+    HeldObjectData data;
+    RE::CreateRefHandleByID(target->GetFormID(), data.handle);
+    data.state      = HeldObjectState::Pulling;
+    data.slotIndex  = static_cast<int>(m_held.size());
+    data.vrLeftHand = vrLeftHand;
+
+    ObjectManipulation::GetSingleton()->BeginPull(target);
+    m_held.push_back(data);
+
+    logger::info("AddObject: grabbed '{}' (slot {})", target->GetName(), data.slotIndex);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RemoveObject
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::RemoveObject(RE::TESObjectREFR* ref) {
+    auto it = std::find_if(m_held.begin(), m_held.end(), [ref](const HeldObjectData& d) {
+        RE::TESObjectREFR* r = nullptr;
+        RE::LookupReferenceByHandle(d.handle, r);
+        return r == ref;
+    });
+
+    if (it == m_held.end()) return;
+
+    ObjectManipulation::GetSingleton()->Drop(*it);
+    m_held.erase(it);
+    ObjectManipulation::GetSingleton()->RepackSlots(m_held);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DropAll — drop everything without throwing
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::DropAll() {
+    auto* manip = ObjectManipulation::GetSingleton();
+    for (auto& obj : m_held) {
+        manip->Drop(obj);
+    }
+    m_held.clear();
+    logger::info("DropAll: all objects released");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ThrowAll — throw all held objects with given charge level
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::ThrowAll(float chargeLevel) {
+    auto* manip   = ObjectManipulation::GetSingleton();
+    auto* dmg     = DamageSystem::GetSingleton();
+    auto* settings = Settings::GetSingleton();
+
+    int alterationSkill = static_cast<int>(
+        RE::PlayerCharacter::GetSingleton()->GetActorValue(RE::ActorValue::kAlteration));
+
+    // Charged throw requires Alteration >= perkLevelCharge
+    if (chargeLevel > 0.0f && alterationSkill < settings->perkLevelCharge) {
+        chargeLevel = 0.0f;
+    }
+
+    for (auto& obj : m_held) {
+        obj.chargeLevel = chargeLevel;
+        if (!obj.IsValid()) continue;
+
+        // Record velocity before throw for damage tracking
+        auto* ref  = obj.Ref();
+        auto* body = HavokUtil::GetRigidBody(ref);
+
+        manip->Throw(obj);
+
+        if (body && alterationSkill >= settings->perkLevelDamage) {
+            RE::NiPoint3 vel = HavokUtil::GetLinearVelocity(body);
+            dmg->RegisterThrown(ref, vel);
+        }
+    }
+    m_held.clear();
+    logger::info("ThrowAll: {} objects thrown (charge={:.2f})", m_held.size(), chargeLevel);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SetCharging — called by InputHandler when throw button held/released
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::SetCharging(bool charging) {
+    for (auto& obj : m_held) {
+        if (charging) {
+            if (obj.state == HeldObjectState::Holding) {
+                obj.state       = HeldObjectState::Charging;
+                obj.chargeLevel = 0.0f;
+            }
+        } else {
+            if (obj.state == HeldObjectState::Charging) {
+                obj.state = HeldObjectState::Holding;
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetPerkMaxObjects — max objects gated by Alteration skill
+// ─────────────────────────────────────────────────────────────────────────────
+int TelekinesisManager::GetPerkMaxObjects() const {
+    auto* settings = Settings::GetSingleton();
+    auto* player   = RE::PlayerCharacter::GetSingleton();
+    if (!player) return 1;
+
+    int skill = static_cast<int>(player->GetActorValue(RE::ActorValue::kAlteration));
+
+    if (skill >= settings->perkLevelMax5)   return 5;
+    if (skill >= settings->perkLevelCharge) return 4;
+    if (skill >= settings->perkLevelOrbit)  return 3;
+    if (skill >= settings->perkLevelDamage) return 2;
+    return 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update — per-frame coordinator
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::Update(float dt) {
+    if (m_held.empty()) return;
+
+    // Remove any invalid/dead refs
+    std::erase_if(m_held, [](const HeldObjectData& d) { return !d.IsValid(); });
+    if (m_held.empty()) return;
+
+    // Drain magicka; drop all if empty
+    DrainMagicka(dt);
+    if (m_held.empty()) return;
+
+    auto* manip     = ObjectManipulation::GetSingleton();
+    int   total     = static_cast<int>(m_held.size());
+
+    for (auto& obj : m_held) {
+        // Update hold position target using current total count
+        // (CalcHoldPosition uses totalCount, but we pass 1 in UpdateHold;
+        // override the position here so formation is correct)
+        auto* ref = obj.Ref();
+        if (!ref) continue;
+
+        RE::NiPoint3 target = manip->CalcHoldPosition(obj.slotIndex, total, obj.vrLeftHand);
+
+        switch (obj.state) {
+        case HeldObjectState::Pulling:
+        case HeldObjectState::Holding:
+            manip->UpdateHold(obj, dt);
+            manip->AlignWeaponToAim(obj);
+            break;
+
+        case HeldObjectState::Charging:
+            manip->UpdateHold(obj, dt);
+            manip->AlignWeaponToAim(obj);
+            obj.chargeLevel = std::min(obj.chargeLevel + dt / Settings::GetSingleton()->throwChargeTime, 1.0f);
+            break;
+
+        case HeldObjectState::Released:
+            // Handled by DamageSystem; remove from our list
+            break;
+        }
+    }
+
+    // Remove Released objects
+    std::erase_if(m_held, [](const HeldObjectData& d) {
+        return d.state == HeldObjectState::Released;
+    });
+    if (!m_held.empty()) {
+        manip->RepackSlots(m_held);
+    }
+
+    // Orbit shield
+    auto* settings = Settings::GetSingleton();
+    int altSkill = static_cast<int>(
+        RE::PlayerCharacter::GetSingleton()->GetActorValue(RE::ActorValue::kAlteration));
+
+    if (settings->orbitShieldEnabled && total > 1 && altSkill >= settings->perkLevelOrbit) {
+        CheckProjectileIntercepts();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DrainMagicka — cost = base * perObj^(count-1) per second
+// Drop everything if magicka runs out.
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::DrainMagicka(float dt) {
+    auto* settings = Settings::GetSingleton();
+    auto* player   = RE::PlayerCharacter::GetSingleton();
+    if (!player) return;
+
+    int   count   = static_cast<int>(m_held.size());
+    float cost    = settings->magickaCostBase
+                    * std::pow(settings->magickaCostPerObj, static_cast<float>(count - 1))
+                    * dt;
+
+    float current = player->GetActorValue(RE::ActorValue::kMagicka);
+    if (current <= 0.0f) {
+        logger::info("Magicka exhausted — dropping all objects");
+        DropAll();
+        return;
+    }
+
+    player->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
+                               RE::ActorValue::kMagicka, -cost);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CheckProjectileIntercepts — orbit objects block incoming projectiles
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::CheckProjectileIntercepts() {
+    auto* settings = Settings::GetSingleton();
+    auto* player   = RE::PlayerCharacter::GetSingleton();
+    if (!player) return;
+
+    RE::NiPoint3 playerPos = player->GetPosition();
+    float        rSq       = settings->interceptRadius * settings->interceptRadius;
+
+    // Check all active projectiles in process lists
+    auto* pl = RE::ProcessLists::GetSingleton();
+    if (!pl) return;
+
+    pl->GetMagicEffects([&](RE::BSTArray<RE::ProjectileHandle>& projHandles) {
+        for (auto& handle : projHandles) {
+            auto* proj = handle.get().get();
+            if (!proj) continue;
+            if (proj->shooter.get().get() == player) continue;  // our own projectiles
+
+            RE::NiPoint3 projPos = proj->GetPosition();
+            float dx = projPos.x - playerPos.x;
+            float dy = projPos.y - playerPos.y;
+            float dz = projPos.z - playerPos.z;
+
+            if (dx * dx + dy * dy + dz * dz <= rSq) {
+                // Within intercept sphere — roll chance
+                float roll = static_cast<float>(rand()) / RAND_MAX;
+                if (roll < settings->interceptChance) {
+                    proj->SetPosition({ projPos.x, projPos.y, projPos.z + 9999.0f });
+                    proj->Disable();
+                    logger::debug("Orbit shield intercepted projectile {:08X}", proj->GetFormID());
+                }
+            }
+        }
+    });
+}
