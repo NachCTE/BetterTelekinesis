@@ -39,6 +39,15 @@ TelekinesisManager* TelekinesisManager::GetSingleton() {
 
 void TelekinesisManager::Initialize() {
     UpdateHook::Install();
+
+    // Look up the spell by EditorID so we can detect when it's being cast.
+    m_spell = RE::TESForm::LookupByEditorID<RE::SpellItem>("BetterTelekinesisSpell");
+    if (m_spell) {
+        logger::info("TelekinesisManager: found spell {:08X}", m_spell->GetFormID());
+    } else {
+        logger::warn("TelekinesisManager: BetterTelekinesisSpell not found — check ESP is loaded!");
+    }
+
     logger::info("TelekinesisManager initialized");
 }
 
@@ -145,22 +154,108 @@ void TelekinesisManager::ThrowAll(float chargeLevel) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SetCharging — called by InputHandler when throw button held/released
+// IsSpellActive — true while the player is actively casting our spell
 // ─────────────────────────────────────────────────────────────────────────────
-void TelekinesisManager::SetCharging(bool charging) {
-    for (auto& obj : m_held) {
-        if (charging) {
-            if (obj.state == HeldObjectState::Holding) {
-                obj.state       = HeldObjectState::Charging;
-                obj.chargeLevel = 0.0f;
-            }
-        } else {
-            if (obj.state == HeldObjectState::Charging) {
-                obj.state = HeldObjectState::Holding;
-            }
+bool TelekinesisManager::IsSpellActive() const {
+    if (!m_spell) return false;
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player) return false;
+
+    auto* list = player->GetMagicTarget()->GetActiveEffectList();
+    if (!list) return false;
+
+    for (auto* eff : *list) {
+        if (!eff) continue;
+        if (eff->spell == m_spell &&
+            eff->flags.none(RE::ActiveEffect::Flag::kInactive) &&
+            eff->flags.none(RE::ActiveEffect::Flag::kDispelled)) {
+            return true;
         }
     }
+    return false;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update — per-frame coordinator
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::Update(float dt) {
+    auto* settings = Settings::GetSingleton();
+
+    // ── Spell state machine ──────────────────────────────────────────────────
+    bool spellActive = IsSpellActive();
+
+    if (spellActive && !m_wasSpellActive) {
+        // Button just pressed — grab nearest object
+        AddObject(false);
+        m_castHoldTime = 0.0f;
+    }
+
+    if (!spellActive && m_wasSpellActive && !m_held.empty()) {
+        // Button just released — throw with accumulated charge
+        float charge = std::clamp(m_castHoldTime / settings->throwChargeTime, 0.0f, 1.0f);
+        logger::debug("Spell ended — throwing (hold={:.2f}s charge={:.2f})", m_castHoldTime, charge);
+        ThrowAll(charge);
+        m_wasSpellActive = spellActive;
+        return;
+    }
+
+    m_wasSpellActive = spellActive;
+
+    if (m_held.empty()) return;
+
+    if (spellActive) {
+        m_castHoldTime += dt;
+    }
+
+    // Remove any invalid/dead refs
+    std::erase_if(m_held, [](const HeldObjectData& d) { return !d.IsValid(); });
+    if (m_held.empty()) return;
+
+    // Drain magicka; drop all if empty
+    DrainMagicka(dt);
+    if (m_held.empty()) return;
+
+    auto* manip = ObjectManipulation::GetSingleton();
+    int   total = static_cast<int>(m_held.size());
+
+    for (auto& obj : m_held) {
+        auto* ref = obj.Ref();
+        if (!ref) continue;
+
+        manip->CalcHoldPosition(obj.slotIndex, total, obj.vrLeftHand);
+
+        switch (obj.state) {
+        case HeldObjectState::Pulling:
+        case HeldObjectState::Holding:
+        case HeldObjectState::Charging:
+            manip->UpdateHold(obj, dt);
+            manip->AlignWeaponToAim(obj);
+            break;
+        case HeldObjectState::Released:
+            break;
+        }
+    }
+
+    std::erase_if(m_held, [](const HeldObjectData& d) {
+        return d.state == HeldObjectState::Released;
+    });
+    if (!m_held.empty()) {
+        manip->RepackSlots(m_held);
+    }
+
+    // Orbit shield
+    int altSkill = static_cast<int>(
+        RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAlteration));
+
+    if (settings->orbitShieldEnabled && total > 1 && altSkill >= settings->perkLevelOrbit) {
+        CheckProjectileIntercepts();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SetCharging — kept for compatibility but no longer used (driven by spell state)
+// ─────────────────────────────────────────────────────────────────────────────
+void TelekinesisManager::SetCharging(bool /*charging*/) {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GetPerkMaxObjects — max objects gated by Alteration skill
@@ -177,69 +272,6 @@ int TelekinesisManager::GetPerkMaxObjects() const {
     if (skill >= settings->perkLevelOrbit)  return 3;
     if (skill >= settings->perkLevelDamage) return 2;
     return 1;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Update — per-frame coordinator
-// ─────────────────────────────────────────────────────────────────────────────
-void TelekinesisManager::Update(float dt) {
-    if (m_held.empty()) return;
-
-    // Remove any invalid/dead refs
-    std::erase_if(m_held, [](const HeldObjectData& d) { return !d.IsValid(); });
-    if (m_held.empty()) return;
-
-    // Drain magicka; drop all if empty
-    DrainMagicka(dt);
-    if (m_held.empty()) return;
-
-    auto* manip     = ObjectManipulation::GetSingleton();
-    int   total     = static_cast<int>(m_held.size());
-
-    for (auto& obj : m_held) {
-        // Update hold position target using current total count
-        // (CalcHoldPosition uses totalCount, but we pass 1 in UpdateHold;
-        // override the position here so formation is correct)
-        auto* ref = obj.Ref();
-        if (!ref) continue;
-
-        RE::NiPoint3 target = manip->CalcHoldPosition(obj.slotIndex, total, obj.vrLeftHand);
-
-        switch (obj.state) {
-        case HeldObjectState::Pulling:
-        case HeldObjectState::Holding:
-            manip->UpdateHold(obj, dt);
-            manip->AlignWeaponToAim(obj);
-            break;
-
-        case HeldObjectState::Charging:
-            manip->UpdateHold(obj, dt);
-            manip->AlignWeaponToAim(obj);
-            obj.chargeLevel = std::min(obj.chargeLevel + dt / Settings::GetSingleton()->throwChargeTime, 1.0f);
-            break;
-
-        case HeldObjectState::Released:
-            // Handled by DamageSystem; remove from our list
-            break;
-        }
-    }
-
-    // Remove Released objects
-    std::erase_if(m_held, [](const HeldObjectData& d) {
-        return d.state == HeldObjectState::Released;
-    });
-    if (!m_held.empty()) {
-        manip->RepackSlots(m_held);
-    }
-
-    // Orbit shield
-    auto* settings = Settings::GetSingleton();
-    int altSkill = static_cast<int>(
-        RE::PlayerCharacter::GetSingleton()->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAlteration));
-
-    if (settings->orbitShieldEnabled && total > 1 && altSkill >= settings->perkLevelOrbit) {
-        CheckProjectileIntercepts();
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
