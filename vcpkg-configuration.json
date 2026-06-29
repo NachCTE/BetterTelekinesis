@@ -3,13 +3,13 @@
     "registries": [
         {
             "kind": "git",
-            "repository": "https://github.com/Qudix/vcpkg-registry",
-            "baseline": "UPDATE_THIS_BASELINE",
+            "repository": "https://gitlab.com/colorglass/vcpkg-colorglass",
+            "baseline": "6309841a1ce770409708a67a9ba5c26c537d2937",
             "packages": ["commonlibsse-ng"]
         }
     ],
     "default-registry": {
         "kind": "builtin",
-        "baseline": "UPDATE_THIS_BASELINE"
+        "baseline": "fc7804f40b20e58366a38e203620cecf0ee786db"
     }
 }
