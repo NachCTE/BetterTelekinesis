@@ -371,20 +371,31 @@ void Telekinesis::Update(float dt)
     bool active = IsSpellActive();
 
     if (active && !m_wasActive) {
-        // Spell just activated → grab nearest object in crosshair
         TryGrab();
     }
 
     if (!active && m_wasActive && m_held) {
-        // Spell just deactivated → throw
         Throw();
     }
 
     m_wasActive = active;
 
-    // Keep holding the object every frame while spell is active
     if (active && m_held) {
         Hold(dt);
+    }
+
+    // Counteract the SpeedMult/turn-speed debuff Skyrim applies during concentration casting
+    if (active) {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (player) {
+            auto* avo = player->AsActorValueOwner();
+            // Remove the kDamage modifier on SpeedMult that the casting system applies
+            float dmgMod = avo->GetActorValue(RE::ActorValue::kSpeedMult)
+                         - avo->GetPermanentActorValue(RE::ActorValue::kSpeedMult);
+            if (dmgMod < -0.1f)
+                avo->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
+                                       RE::ActorValue::kSpeedMult, -dmgMod);
+        }
     }
 
     // Track thrown object for damage
