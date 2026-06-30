@@ -1,6 +1,7 @@
 #include "Telekinesis.h"
 #include <REL/Relocation.h>
 #include <RE/H/hkpMotion.h>
+#include <RE/H/hkpEntity.h>
 #include <numbers>
 
 // ── Hook on PlayerCharacter::Update ────────────────────────────────────────
@@ -80,6 +81,37 @@ RE::bhkRigidBody* Telekinesis::GetBody(RE::TESObjectREFR* ref)
     auto* col = static_cast<RE::bhkNiCollisionObject*>(root->collisionObject.get());
     if (!col || !col->body) return nullptr;
     return static_cast<RE::bhkRigidBody*>(col->body.get());
+}
+
+float Telekinesis::GetMass(RE::TESObjectREFR* ref)
+{
+    auto* body = GetBody(ref);
+    if (!body) return 1.0f;
+    // bhkRefObject::referencedObject is a hkReferencedObject* which is actually hkpEntity*
+    // hkpEntity::motion (hkpMaxSizeMotion) is at offset 0x150 from hkpEntity base
+    // hkpMotion::type is at +0x010 within hkpMotion, inertiaAndMassInv at +0x0D0
+    auto* hkRef = body->referencedObject.get();
+    if (!hkRef) return 1.0f;
+    auto* motion = reinterpret_cast<RE::hkpMotion*>(
+        reinterpret_cast<std::uint8_t*>(hkRef) + 0x150);
+    float mass = motion->GetMass();
+    return (mass > 0.0f) ? mass : 1.0f;
+}
+
+float Telekinesis::GetSpeed(RE::TESObjectREFR* ref)
+{
+    auto* body = GetBody(ref);
+    if (!body) return 0.0f;
+    auto* hkRef = body->referencedObject.get();
+    if (!hkRef) return 0.0f;
+    auto* motion = reinterpret_cast<RE::hkpMotion*>(
+        reinterpret_cast<std::uint8_t*>(hkRef) + 0x150);
+    // linearVelocity is in Havok units/s — convert to Skyrim units/s
+    const auto& v = motion->linearVelocity;
+    float hkSpeed = std::sqrt(v.quad.m128_f32[0]*v.quad.m128_f32[0] +
+                               v.quad.m128_f32[1]*v.quad.m128_f32[1] +
+                               v.quad.m128_f32[2]*v.quad.m128_f32[2]);
+    return hkSpeed / kHavokScale; // back to Skyrim units/s
 }
 
 // ── Spell detection ─────────────────────────────────────────────────────────
@@ -250,12 +282,74 @@ void Telekinesis::Throw()
         body->SetPosition(curHk);
         body->SetLinearVelocity(ToHavok(vel));
 
+        // Begin tracking for damage
+        m_projectile     = m_held;
+        m_projectileTime = 0.0f;
+        m_throwSpeed     = force;
+
         logger::info("Thrown '{}' force={:.0f} charge={:.2f}",
                      ref->GetName(), force, charge);
     }
 
     m_held     = {};
     m_holdTime = 0.0f;
+}
+
+// ── Projectile damage tracking ───────────────────────────────────────────────
+void Telekinesis::TrackProjectile(float dt)
+{
+    auto* proj = m_projectile.get().get();
+    if (!proj) { m_projectile = {}; return; }
+
+    m_projectileTime += dt;
+    if (m_projectileTime > kTrackDuration) {
+        m_projectile = {};
+        return;
+    }
+
+    float curSpeed = GetSpeed(proj);
+    if (curSpeed < kMinImpactSpeed) {
+        // Object slowed down — don't bother (still flying or already at rest)
+        return;
+    }
+
+    RE::NiPoint3 projPos = proj->GetPosition();
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* cell   = player ? player->GetParentCell() : nullptr;
+    if (!cell) return;
+
+    RE::Actor* hitActor = nullptr;
+    float      closestDist = kImpactRadius;
+
+    cell->ForEachReference([&](RE::TESObjectREFR& ref) {
+        if (ref.IsDisabled() || ref.IsDeleted()) return RE::BSContainer::ForEachResult::kContinue;
+        auto* actor = ref.As<RE::Actor>();
+        if (!actor || actor == player) return RE::BSContainer::ForEachResult::kContinue;
+
+        RE::NiPoint3 apos = actor->GetPosition();
+        RE::NiPoint3 d    = { projPos.x - apos.x, projPos.y - apos.y, projPos.z - apos.z };
+        float dist = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+        if (dist < closestDist) {
+            closestDist = dist;
+            hitActor    = actor;
+        }
+        return RE::BSContainer::ForEachResult::kContinue;
+    });
+
+    if (!hitActor) return;
+
+    float mass   = GetMass(proj);
+    float damage = mass * curSpeed * kDamageFactor;
+    damage = std::clamp(damage, 1.0f, 500.0f);
+
+    hitActor->AsActorValueOwner()->RestoreActorValue(
+        RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -damage);
+
+    logger::info("Hit '{}' for {:.1f} dmg (mass={:.1f} speed={:.0f})",
+                 hitActor->GetName(), damage, mass, curSpeed);
+
+    // One hit per throw
+    m_projectile = {};
 }
 
 // ── Release (drop) ───────────────────────────────────────────────────────────
@@ -291,5 +385,10 @@ void Telekinesis::Update(float dt)
     // Keep holding the object every frame while spell is active
     if (active && m_held) {
         Hold(dt);
+    }
+
+    // Track thrown object for damage
+    if (m_projectile) {
+        TrackProjectile(dt);
     }
 }
