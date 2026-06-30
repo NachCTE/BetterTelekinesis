@@ -307,18 +307,12 @@ void Telekinesis::TrackProjectile(float dt)
         return;
     }
 
-    float curSpeed = GetSpeed(proj);
-    if (curSpeed < kMinImpactSpeed) {
-        // Object slowed down — don't bother (still flying or already at rest)
-        return;
-    }
-
     RE::NiPoint3 projPos = proj->GetPosition();
     auto* player = RE::PlayerCharacter::GetSingleton();
     auto* cell   = player ? player->GetParentCell() : nullptr;
     if (!cell) return;
 
-    RE::Actor* hitActor = nullptr;
+    RE::Actor* hitActor    = nullptr;
     float      closestDist = kImpactRadius;
 
     cell->ForEachReference([&](RE::TESObjectREFR& ref) {
@@ -326,29 +320,34 @@ void Telekinesis::TrackProjectile(float dt)
         auto* actor = ref.As<RE::Actor>();
         if (!actor || actor == player) return RE::BSContainer::ForEachResult::kContinue;
 
-        RE::NiPoint3 apos = actor->GetPosition();
-        RE::NiPoint3 d    = { projPos.x - apos.x, projPos.y - apos.y, projPos.z - apos.z };
-        float dist = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
-        if (dist < closestDist) {
-            closestDist = dist;
-            hitActor    = actor;
+        // Check against multiple heights: feet (0), torso (+60), head (+120)
+        RE::NiPoint3 base = actor->GetPosition();
+        for (float h : { 0.0f, 60.0f, 120.0f }) {
+            RE::NiPoint3 d = { projPos.x - base.x,
+                               projPos.y - base.y,
+                               projPos.z - (base.z + h) };
+            float dist = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+            if (dist < closestDist) {
+                closestDist = dist;
+                hitActor    = actor;
+            }
         }
         return RE::BSContainer::ForEachResult::kContinue;
     });
 
     if (!hitActor) return;
 
+    // Use initial throw speed — post-impact speed is unreliable (already absorbed by collision)
     float mass   = GetMass(proj);
-    float damage = mass * curSpeed * kDamageFactor;
+    float damage = mass * m_throwSpeed * kDamageFactor;
     damage = std::clamp(damage, 1.0f, 500.0f);
 
     hitActor->AsActorValueOwner()->RestoreActorValue(
         RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -damage);
 
-    logger::info("Hit '{}' for {:.1f} dmg (mass={:.1f} speed={:.0f})",
-                 hitActor->GetName(), damage, mass, curSpeed);
+    logger::info("Hit '{}' for {:.1f} dmg (mass={:.1f} throwSpeed={:.0f} dist={:.1f})",
+                 hitActor->GetName(), damage, mass, m_throwSpeed, closestDist);
 
-    // One hit per throw
     m_projectile = {};
 }
 
@@ -371,31 +370,20 @@ void Telekinesis::Update(float dt)
     bool active = IsSpellActive();
 
     if (active && !m_wasActive) {
+        // Spell just activated → grab nearest object in crosshair
         TryGrab();
     }
 
     if (!active && m_wasActive && m_held) {
+        // Spell just deactivated → throw
         Throw();
     }
 
     m_wasActive = active;
 
+    // Keep holding the object every frame while spell is active
     if (active && m_held) {
         Hold(dt);
-    }
-
-    // Counteract the SpeedMult/turn-speed debuff Skyrim applies during concentration casting
-    if (active) {
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (player) {
-            auto* avo = player->AsActorValueOwner();
-            // Remove the kDamage modifier on SpeedMult that the casting system applies
-            float dmgMod = avo->GetActorValue(RE::ActorValue::kSpeedMult)
-                         - avo->GetPermanentActorValue(RE::ActorValue::kSpeedMult);
-            if (dmgMod < -0.1f)
-                avo->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
-                                       RE::ActorValue::kSpeedMult, -dmgMod);
-        }
     }
 
     // Track thrown object for damage

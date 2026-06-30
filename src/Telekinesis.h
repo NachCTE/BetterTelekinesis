@@ -44,8 +44,7 @@ private:
     static constexpr float kPullStrength    = 8.0f;
     static constexpr float kMaxPullSpeed    = 1500.0f;
     static constexpr float kDamageFactor    = 0.0012f; // tunable: dmg = mass * speed * factor
-    static constexpr float kImpactRadius    = 80.0f;   // units to consider a hit
-    static constexpr float kMinImpactSpeed  = 300.0f;  // minimum speed to deal damage
+    static constexpr float kImpactRadius    = 120.0f;  // units to consider a hit (per height sample)
     static constexpr float kTrackDuration   = 4.0f;    // seconds to track after throw
 
     struct Hook;
