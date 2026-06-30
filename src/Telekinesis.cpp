@@ -345,6 +345,9 @@ void Telekinesis::TrackProjectile(float dt)
     hitActor->AsActorValueOwner()->RestoreActorValue(
         RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -damage);
 
+    // Trigger aggro — HandleHealthDamage notifies the actor's AI of the attacker
+    hitActor->HandleHealthDamage(RE::PlayerCharacter::GetSingleton(), damage);
+
     logger::info("Hit '{}' for {:.1f} dmg (mass={:.1f} throwSpeed={:.0f} dist={:.1f})",
                  hitActor->GetName(), damage, mass, m_throwSpeed, closestDist);
 
