@@ -342,11 +342,14 @@ void Telekinesis::TrackProjectile(float dt)
     float damage = mass * m_throwSpeed * kDamageFactor;
     damage = std::clamp(damage, 1.0f, 500.0f);
 
+    // Apply damage
     hitActor->AsActorValueOwner()->RestoreActorValue(
         RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -damage);
 
-    // Trigger aggro — HandleHealthDamage notifies the actor's AI of the attacker
-    hitActor->HandleHealthDamage(RE::PlayerCharacter::GetSingleton(), damage);
+    // Trigger aggro: mark as attacked + set player as combat target + re-evaluate AI
+    hitActor->SetBeenAttacked(true);
+    hitActor->GetActorRuntimeData().currentCombatTarget = player->GetHandle();
+    hitActor->UpdateCombat();
 
     logger::info("Hit '{}' for {:.1f} dmg (mass={:.1f} throwSpeed={:.0f} dist={:.1f})",
                  hitActor->GetName(), damage, mass, m_throwSpeed, closestDist);
@@ -387,6 +390,19 @@ void Telekinesis::Update(float dt)
     // Keep holding the object every frame while spell is active
     if (active && m_held) {
         Hold(dt);
+    }
+
+    // Counteract the SpeedMult debuff Skyrim applies during concentration casting
+    if (active) {
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        if (p) {
+            auto* avo = p->AsActorValueOwner();
+            float dmgMod = avo->GetActorValue(RE::ActorValue::kSpeedMult)
+                         - avo->GetPermanentActorValue(RE::ActorValue::kSpeedMult);
+            if (dmgMod < -0.1f)
+                avo->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage,
+                                       RE::ActorValue::kSpeedMult, -dmgMod);
+        }
     }
 
     // Track thrown object for damage
